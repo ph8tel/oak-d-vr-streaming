@@ -1,0 +1,6 @@
+aiortc
+av
+aiohttp
+depthai
+opencv-python
+numpy
