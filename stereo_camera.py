@@ -11,14 +11,14 @@ class StereoCamera:
         # --- Mono cameras ---
         mono_left = self.pipeline.createMonoCamera()
         mono_left.setBoardSocket(dai.CameraBoardSocket.LEFT)
-        mono_left.setResolution(dai.MonoCameraProperties.SensorResolution.THE_720_P)
+        mono_left.setResolution(dai.MonoCameraProperties.SensorResolution.THE_800_P)
         left_ctrl = mono_left.initialControl
         left_ctrl.setAutoExposureEnable()
         left_ctrl.setAntiBandingMode(dai.CameraControl.AntiBandingMode.AUTO)
 
         mono_right = self.pipeline.createMonoCamera()
         mono_right.setBoardSocket(dai.CameraBoardSocket.RIGHT)
-        mono_right.setResolution(dai.MonoCameraProperties.SensorResolution.THE_720_P)
+        mono_right.setResolution(dai.MonoCameraProperties.SensorResolution.THE_800_P)
  
         right_ctrl = mono_right.initialControl
         right_ctrl.setAutoExposureEnable()
@@ -88,3 +88,14 @@ class StereoCamera:
     def clear_cache(self):
         if hasattr(self, "_cached"):
             del self._cached
+
+    def get_calibration(self):
+        calib = self.device.readCalibration()
+        k_left = calib.getCameraIntrinsics(dai.CameraBoardSocket.CAM_B, 1200, 800)
+        k_right = calib.getCameraIntrinsics(dai.CameraBoardSocket.CAM_C, 1200, 800)
+        baseline_m = calib.getBaselineDistance() / 1000.0
+        return type("Calibration", (), {
+            "k_left": k_left,
+            "k_right": k_right,
+            "baseline_m": baseline_m,
+        })()
