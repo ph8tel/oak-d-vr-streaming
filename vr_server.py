@@ -203,6 +203,23 @@ async def answer(request):
     
     return web.json_response({"status": "ok"}, headers=headers)
 
+
+async def calibration(request):
+    headers = {"Access-Control-Allow-Origin": "*"}
+    try:
+        calib = stereo_cam.get_calibration()
+        return web.json_response({
+            "k_left": calib.k_left,
+            "k_right": calib.k_right,
+            "baseline_m": calib.baseline_m,
+        }, headers=headers)
+    except Exception as e:
+        print("Calibration error:", e)
+        import traceback
+        traceback.print_exc()
+        return web.json_response({"error": str(e)}, headers=headers)
+
+
 async def on_startup(app):
     # Connect to Pi 4 servo controller (optional, non-blocking)
     await connect_to_servo_controller(host='192.168.1.138', port=9090)
@@ -235,6 +252,7 @@ app = web.Application(middlewares=[cors_middleware])
 
 app.router.add_post("/offer", offer)
 app.router.add_post("/answer", answer)
+app.router.add_get("/calibration", calibration)
 
 # Serve the HTML file at root
 app.router.add_get("/", lambda request: web.FileResponse("./index.html"))
