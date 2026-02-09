@@ -180,7 +180,12 @@ function initGLResources() {
   positionBuffer = gl.createBuffer();
   gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
   gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
-    -1, -1,  1, -1, -1, 1,  -1, 1,  1, -1,  1, 1
+    -1, -1,
+     1, -1,
+     1,  1,
+    -1, -1,
+     1,  1,
+    -1,  1
   ]), gl.STATIC_DRAW);
   gl.enableVertexAttribArray(positionLoc);
   gl.vertexAttribPointer(positionLoc, 2, gl.FLOAT, false, 0, 0);
