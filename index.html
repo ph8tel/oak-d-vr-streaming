@@ -245,69 +245,52 @@
     }
 
     function onXRFrame(time, frame) {
-      const session = frame.session;
-      const pose = frame.getViewerPose(xrRefSpace);
-      if (!pose) {
-        session.requestAnimationFrame(onXRFrame);
-        return;
-      }
+  const session = frame.session;
+  const pose = frame.getViewerPose(xrRefSpace);
+  if (!pose) {
+    session.requestAnimationFrame(onXRFrame);
+    return;
+  }
 
-      const baseLayer = session.renderState.baseLayer;
-      gl.bindFramebuffer(gl.FRAMEBUFFER, baseLayer.framebuffer);
-      gl.clearColor(0, 0, 0, 1);
-      gl.clear(gl.COLOR_BUFFER_BIT);
+  const baseLayer = session.renderState.baseLayer;
+  gl.bindFramebuffer(gl.FRAMEBUFFER, baseLayer.framebuffer);
+  gl.clearColor(0, 0, 0, 1);
+  gl.clear(gl.COLOR_BUFFER_BIT);
 
-      gl.useProgram(program);
+  gl.useProgram(program);
 
-      const posLoc = gl.getAttribLocation(program, "a_position");
-      const texLoc = gl.getAttribLocation(program, "a_texcoord");
-      const samplerLoc = gl.getUniformLocation(program, "u_texture");
+  const views = pose.views;
 
-      gl.enableVertexAttribArray(posLoc);
-      gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
-      gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 0, 0);
+  for (let i = 0; i < views.length; i++) {
+    const view = views[i];
+    const viewport = baseLayer.getViewport(view);
+    gl.viewport(viewport.x, viewport.y, viewport.width, viewport.height);
 
-      gl.enableVertexAttribArray(texLoc);
-      gl.bindBuffer(gl.ARRAY_BUFFER, texcoordBuffer);
-      gl.vertexAttribPointer(texLoc, 2, gl.FLOAT, false, 0, 0);
+    // --- NEW: projection + view override ---
+    const proj = (view.eye === "left") ? projLeft : projRight;
 
-      const views = pose.views;
+    const viewMatrix = new Float32Array(view.transform.inverse.matrix);
+    const baseline = calib.baseline_m;
+    viewMatrix[12] = (view.eye === "left") ? -baseline / 2 : baseline / 2;
 
-      for (let i = 0; i < views.length; i++) {
-        const view = views[i];
-        const viewport = baseLayer.getViewport(view);
-        gl.viewport(viewport.x, viewport.y, viewport.width, viewport.height);
-        // Choose the correct projection matrix
-        const proj = (view.eye === "left") ? projLeft : projRight;
-        
-        // Copy XR view matrix and override translation with OAK-D baseline
-        const viewMatrix = new Float32Array(view.transform.inverse.matrix);
-        const baseline = calib.baseline_m;
-        
-        if (view.eye === "left") {
-          viewMatrix[12] = -baseline / 2;
-        } else {
-          viewMatrix[12] = baseline / 2;
-        }
-        
-        // Upload matrices
-        gl.uniformMatrix4fv(uProjectionLoc, false, proj);
-        gl.uniformMatrix4fv(uViewLoc, false, viewMatrix);
+    gl.uniformMatrix4fv(uProjectionLoc, false, proj);
+    gl.uniformMatrix4fv(uViewLoc, false, viewMatrix);
+    // ---------------------------------------
 
-        if (i === 0) {
-          updateTextureFromVideo(leftTexture, leftVideo);
-          gl.bindTexture(gl.TEXTURE_2D, leftTexture);
-        } else {
-          updateTextureFromVideo(rightTexture, rightVideo);
-          gl.bindTexture(gl.TEXTURE_2D, rightTexture);
-        }
-
-        gl.uniform1i(samplerLoc, 0);
-        gl.drawArrays(gl.TRIANGLES, 0, 6);
-      }
-
-      session.requestAnimationFrame(onXRFrame);
+    if (i === 0) {
+      updateTextureFromVideo(leftTexture, leftVideo);
+      gl.bindTexture(gl.TEXTURE_2D, leftTexture);
+    } else {
+      updateTextureFromVideo(rightTexture, rightVideo);
+      gl.bindTexture(gl.TEXTURE_2D, rightTexture);
     }
+
+    gl.uniform1i(samplerLoc, 0);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+  }
+
+  session.requestAnimationFrame(onXRFrame);
+}
 
     document.getElementById("enter-vr").addEventListener("click", () => {
       startXR();
@@ -316,3 +299,4 @@
 </body>
 
 </html>
+
