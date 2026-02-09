@@ -47,6 +47,32 @@
     let positionBuffer = null;
     let texcoordBuffer = null;
 
+    let calib = null
+
+    async function loadCalibration() {
+      const res = await fetch("/calibration");
+      calib = await res.json();
+    }
+
+    function projectionFromIntrinsics(K, width, height, near, far) {
+      const fx = K[0][0];
+      const fy = K[1][1];
+      const cx = K[0][2];
+      const cy = K[1][2];
+    
+      const proj = new Float32Array(16);
+    
+      proj[0]  =  2 * fx / width;
+      proj[5]  =  2 * fy / height;
+      proj[8]  =  1 - (2 * cx / width);
+      proj[9]  =  (2 * cy / height) - 1;
+      proj[10] = -(far + near) / (far - near);
+      proj[11] = -1;
+      proj[14] = -(2 * far * near) / (far - near);
+    
+      return proj;
+    }
+
     async function startWebRTC() {
       pc = new RTCPeerConnection();
 
@@ -106,10 +132,14 @@
       const vsSource = `
         attribute vec2 a_position;
         attribute vec2 a_texcoord;
+
+        uniform mat4 uProjection;
+        uniform mat4 uView;
+
         varying vec2 v_texcoord;
         void main() {
           v_texcoord = a_texcoord;
-          gl_Position = vec4(a_position, 0.0, 1.0);
+          gl_Position = uProjection * uView * vec(a_position, 0.0, 1.0);
         }
       `;
 
@@ -126,6 +156,8 @@
       const fs = createShader(gl, gl.FRAGMENT_SHADER, fsSource);
 
       program = gl.createProgram();
+      const uProjectionLoc = gl.getUniformLocation(program, "uProjection");
+      const uViewLoc = gl.getUniformLocation(program, "uView");
       gl.attachShader(program, vs);
       gl.attachShader(program, fs);
       gl.linkProgram(program);
@@ -175,11 +207,18 @@
       }
 
       await startWebRTC(); // ensure streams are flowing
+      await loadCalibration(); // get calibration data from camera
 
       if (!gl) {
         initGLResources();
       }
-
+      const width = 1280;
+      const height = 800;
+      const near = 0.01;
+      const far = 1000.0;
+      
+      const projLeft  = projectionFromIntrinsics(calib.k_left,  width, height, near, far);
+      const projRight = projectionFromIntrinsics(calib.k_right, width, height, near, far);
       xrSession = await navigator.xr.requestSession("immersive-vr", {
         requiredFeatures: ["local-floor"]
       });
@@ -238,6 +277,22 @@
         const view = views[i];
         const viewport = baseLayer.getViewport(view);
         gl.viewport(viewport.x, viewport.y, viewport.width, viewport.height);
+        // Choose the correct projection matrix
+        const proj = (view.eye === "left") ? projLeft : projRight;
+        
+        // Copy XR view matrix and override translation with OAK-D baseline
+        const viewMatrix = new Float32Array(view.transform.inverse.matrix);
+        const baseline = calib.baseline_m;
+        
+        if (view.eye === "left") {
+          viewMatrix[12] = -baseline / 2;
+        } else {
+          viewMatrix[12] = baseline / 2;
+        }
+        
+        // Upload matrices
+        gl.uniformMatrix4fv(uProjectionLoc, false, proj);
+        gl.uniformMatrix4fv(uViewLoc, false, viewMatrix);
 
         if (i === 0) {
           updateTextureFromVideo(leftTexture, leftVideo);
@@ -259,4 +314,5 @@
     });
   </script>
 </body>
+
 </html>
