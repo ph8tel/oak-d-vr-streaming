@@ -70,7 +70,9 @@ class CameraTrack(VideoStreamTrack):
 # WebRTC Signaling Server
 # -----------------------------
 pcs = set()
-stereo_cam = StereoCamera(size=(1280, 720))
+# Defer creating the StereoCamera until startup so the server can run
+# even if DepthAI hardware or driver APIs are missing during import.
+stereo_cam = None
 
 # Store the most recent peer connection for answer endpoint
 _current_pc = None
@@ -206,6 +208,7 @@ async def answer(request):
 
 async def calibration(request):
     headers = {"Access-Control-Allow-Origin": "*"}
+    print("calibration fetched")
     try:
         calib = stereo_cam.get_calibration()
         return web.json_response({
@@ -223,6 +226,17 @@ async def calibration(request):
 async def on_startup(app):
     # Connect to Pi 4 servo controller (optional, non-blocking)
     await connect_to_servo_controller(host='192.168.1.138', port=9090)
+    # Initialize stereo camera here so import-time failures don't kill the server
+    global stereo_cam
+    if stereo_cam is None:
+        try:
+            stereo_cam = StereoCamera(size=(1280, 720))
+            print("✓ StereoCamera initialized")
+        except Exception as e:
+            print("Warning: StereoCamera initialization failed:", e)
+            import traceback
+            traceback.print_exc()
+            stereo_cam = None
 
 async def on_shutdown(app):
     global servo_writer
@@ -233,7 +247,11 @@ async def on_shutdown(app):
     
     for pc in pcs:
         await pc.close()
-    stereo_cam.stop()
+    if stereo_cam:
+        try:
+            stereo_cam.stop()
+        except Exception:
+            pass
 # Add this BEFORE creating routes
 @web.middleware
 async def cors_middleware(request, handler):
