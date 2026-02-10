@@ -15,8 +15,15 @@
   <video id="rightVideo" autoplay playsinline muted style="display:none"></video>
 
   <canvas id="glcanvas"></canvas>
-
-  <script src="/static/index.js"></script>
+  <!-- Inline bootstrap: catch errors even if external scripts fail to load -->
+  <script>
+    window.onerror = function(msg, src, line, col, err) {
+      var el = document.getElementById("error-overlay");
+      if (el) { el.style.display = "block"; el.textContent = msg + " (" + src + ":" + line + ")"; }
+    };
+  </script>
+  <script src="/static/logging.js?v=2"></script>
+  <script src="/static/index.js?v=2"></script>
 </body>
 
 </html>
