@@ -14,50 +14,7 @@ let program = null;
 let positionBuffer = null;
 let texcoordBuffer = null;
 
-let errorOverlay = document.getElementById("error-overlay");
-let statusEl = document.getElementById("status");
 
-// In-VR log overlay (visible via DOM overlay)
-let logOverlay = null;
-let _logLines = [];
-function createLogOverlay() {
-  if (logOverlay) return;
-  logOverlay = document.createElement('div');
-  logOverlay.id = 'log-overlay';
-  Object.assign(logOverlay.style, {
-    position: 'absolute',
-    right: '12px',
-    top: '12px',
-    width: '320px',
-    maxHeight: '40vh',
-    overflowY: 'auto',
-    background: 'rgba(0,0,0,0.45)',
-    color: '#9ad1ff',
-    fontFamily: 'monospace',
-    fontSize: '12px',
-    padding: '8px',
-    borderRadius: '6px',
-    zIndex: 9999,
-    pointerEvents: 'none',
-    whiteSpace: 'pre-wrap'
-  });
-  document.body.appendChild(logOverlay);
-}
-
-function logToOverlay(msg, level='info') {
-  try {
-    if (!logOverlay) createLogOverlay();
-    const ts = (new Date()).toISOString().replace('T',' ').slice(0,19);
-    const line = `${ts} ${level.toUpperCase()}: ${msg}`;
-    _logLines.push(line);
-    if (_logLines.length > 200) _logLines.shift();
-    logOverlay.textContent = _logLines.join('\n');
-    // keep latest visible
-    logOverlay.scrollTop = logOverlay.scrollHeight;
-  } catch (e) {
-    // ignore overlay errors
-  }
-}
 
 let hasLoggedLeftVideo = false;
 let hasLoggedRightVideo = false;
@@ -70,22 +27,6 @@ let projLeft = null;
 let projRight = null;
 
 let calib = null;
-
-function setStatus(message) {
-  if (statusEl) statusEl.textContent = message;
-  logToOverlay(message, 'status');
-}
-
-function logError(message, err) {
-  const details = err ? `\n${err.stack || err}` : "";
-  const text = `${message}${details}`;
-  if (errorOverlay) {
-    errorOverlay.style.display = "block";
-    errorOverlay.textContent = text;
-  }
-  console.error(text);
-  logToOverlay(text, 'error');
-}
 
 async function loadCalibration() {
   try {
@@ -103,20 +44,30 @@ async function loadCalibration() {
   }
 }
 
-function projectionFromIntrinsics(K, width, height, near, far) {
-  const fx = K[0][0];
-  const fy = K[1][1];
+/**
+ * Build a per-eye shift matrix for flat video passthrough.
+ *
+ * For flat stereo video the quad must fill the viewport exactly (identity
+ * scale).  The only correction needed is a horizontal translation that
+ * aligns the physical camera's optical axis (cx) with the headset
+ * viewport centre.  A positive shift moves the image left (pushes
+ * convergence closer), a negative shift moves it right.
+ *
+ * dx = (cx - width/2) / (width/2)   → NDC units
+ * dy = (cy - height/2) / (height/2) → NDC units (usually ~0)
+ */
+function principalPointShift(K, width, height) {
   const cx = K[0][2];
   const cy = K[1][2];
-  const proj = new Float32Array(16);
-  proj[0]  =  2 * fx / width;
-  proj[5]  =  2 * fy / height;
-  proj[8]  =  1 - (2 * cx / width);
-  proj[9]  =  (2 * cy / height) - 1;
-  proj[10] = -(far + near) / (far - near);
-  proj[11] = -1;
-  proj[14] = -(2 * far * near) / (far - near);
-  return proj;
+  const dx = (cx - width  / 2) / (width  / 2);
+  const dy = (cy - height / 2) / (height / 2);
+  // Column-major identity + translation
+  return new Float32Array([
+    1, 0, 0, 0,
+    0, 1, 0, 0,
+    0, 0, 1, 0,
+    -dx, dy, 0, 1   // negate dx: camera cx right-of-centre → shift image left
+  ]);
 }
 
 function createDefaultTextureCanvas() {
@@ -198,10 +149,11 @@ function initGLResources() {
   const vsSource = `
     attribute vec2 a_position;
     attribute vec2 a_texcoord;
+    uniform mat4 uProjection;
     varying vec2 v_texcoord;
     void main() {
       v_texcoord = a_texcoord;
-      gl_Position = vec4(a_position, 0.0, 1.0);
+      gl_Position = uProjection * vec4(a_position, 0.0, 1.0);
     }
   `;
   const fsSource = `
@@ -289,9 +241,9 @@ async function startXR() {
   if (!gl) {
     try { initGLResources(); } catch (err) { logError("WebGL init failed", err); return; }
   }
-  const width = 1280, height = 800, near = 0.01, far = 1000.0;
-  projLeft = projectionFromIntrinsics(calib.k_left, width, height, near, far);
-  projRight = projectionFromIntrinsics(calib.k_right, width, height, near, far);
+  const width = 1280, height = 720;
+  projLeft = principalPointShift(calib.k_left, width, height);
+  projRight = principalPointShift(calib.k_right, width, height);
 
   xrSession = await navigator.xr.requestSession("immersive-vr", {
     requiredFeatures: ["local-floor"], optionalFeatures: ["dom-overlay"], domOverlay: { root: document.body }
@@ -355,6 +307,12 @@ function onXRFrame(time, frame) {
 
       // Ensure the sampler is set to texture unit 0
       if (samplerLoc) gl.uniform1i(samplerLoc, 0);
+
+      // Set per-eye projection from camera calibration
+      const proj = (i === 0) ? projLeft : projRight;
+      if (uProjectionLoc && proj) {
+        gl.uniformMatrix4fv(uProjectionLoc, false, proj);
+      }
 
       // Draw the fullscreen quad as a TRIANGLE_STRIP (4 verts)
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
