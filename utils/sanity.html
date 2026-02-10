@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>WebXR Sanity Check</title>
+    <meta charset="utf-8">
+    <style>
+        body { 
+            margin: 0; 
+            padding: 0; 
+            font-family: Arial, sans-serif;
+            overflow: hidden;
+        }
+        canvas { 
+            display: block; 
+            width: 100%; 
+            height: 100%; 
+        }
+        #startButton {
+            top: 20px;
+            left: 20px;
+            z-index: 100;
+            padding: 10px 20px;
+            background: rgba(0,0,0,0.7);
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 16px;
+        }
+        #status {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            z-index: 100;
+            color: white;
+            background: rgba(0,0,0,0.7);
+            padding: 10px;
+            border-radius: 5px;
+            font-size: 14px;
+            max-width: 80%;
+            word-wrap: break-word;
+        }
+        #container {
+            position: relative;
+            width: 100%;
+            height: 100%;
+        }
+    </style>
+</head>
+<body>
+    <div id="container">
+        <canvas id="glCanvas"></canvas>
+        
+        <div id="status">WebXR Status: Checking...</div>
+        <button id="startButton">Enter VR</button>
+    </div>
+    
+    <script>
+        let session = null;
+        let gl = null;
+        let baseLayer = null;
+        let xrRefSpace = null;
+        let uColorLoc = null;
+        let program = null;
+        let isRendering = false;
+        
+        async function initWebXR() {
+            try {
+                const status = document.getElementById('status');
+                const startButton = document.getElementById('startButton');
+                
+                status.textContent = "WebXR Status: Checking support...";
+                startButton.disabled = true;
+                startButton.style.opacity = "0.5";
+                
+                if (!navigator.xr) {
+                    status.textContent = "WebXR Status: Not supported";
+                    console.log("WebXR not supported");
+                    startButton.disabled = false;
+                    startButton.style.opacity = "1";
+                    return;
+                }
+                
+                status.textContent = "WebXR Status: Requesting session...";
+                console.log("Requesting WebXR session...");
+                
+                // Request immersive VR session
+                session = await navigator.xr.requestSession('immersive-vr', {
+                    requiredFeatures: ['local-floor']
+                });
+                
+                status.textContent = "WebXR Status: Session created successfully";
+                console.log("WebXR session created successfully");
+                
+                const canvas = document.getElementById('glCanvas');
+                gl = canvas.getContext('webgl2');
+                
+                if (!gl) {
+                    status.textContent = "WebXR Status: WebGL not supported";
+                    console.log("WebGL not supported");
+                    startButton.disabled = false;
+                    startButton.style.opacity = "1";
+                    return;
+                }
+                
+                // Set canvas size to match window
+                canvas.width = window.innerWidth;
+                canvas.height = window.innerHeight;
+
+                // Ensure the WebGL context is compatible with XR before creating the XR layer
+                if (gl.makeXRCompatible) {
+                    await gl.makeXRCompatible();
+                }
+                
+                // Create a simple shader program
+                const vsSource = `
+                    attribute vec2 a_position;
+                    attribute vec2 a_texcoord;
+                    varying vec2 v_texcoord;
+                    void main() {
+                        v_texcoord = a_texcoord;
+                        gl_Position = vec4(a_position, 0.0, 1.0);
+                    }
+                `;
+                
+                const fsSource = `
+                    precision mediump float;
+                    varying vec2 v_texcoord;
+                    uniform vec3 uColor;
+                    void main() {
+                        gl_FragColor = vec4(uColor, 1.0);
+                    }
+                `;
+                
+                // Compile shaders
+                const vertexShader = gl.createShader(gl.VERTEX_SHADER);
+                gl.shaderSource(vertexShader, vsSource);
+                gl.compileShader(vertexShader);
+                
+                const fragmentShader = gl.createShader(gl.FRAGMENT_SHADER);
+                gl.shaderSource(fragmentShader, fsSource);
+                gl.compileShader(fragmentShader);
+                
+                // Create program
+                program = gl.createProgram();
+                gl.attachShader(program, vertexShader);
+                gl.attachShader(program, fragmentShader);
+                gl.linkProgram(program);
+                gl.useProgram(program);
+                // Uniform locations
+                uColorLoc = gl.getUniformLocation(program, 'uColor');
+                
+                // Set up buffers
+                const positionBuffer = gl.createBuffer();
+                gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+                const positions = [
+                    -1, -1,
+                     1, -1,
+                    -1,  1,
+                     1,  1,
+                ];
+                gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(positions), gl.STATIC_DRAW);
+                
+                const texcoordBuffer = gl.createBuffer();
+                gl.bindBuffer(gl.ARRAY_BUFFER, texcoordBuffer);
+                const texcoords = [
+                    0, 1,
+                    1, 1,
+                    0, 0,
+                    1, 0,
+                ];
+                gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(texcoords), gl.STATIC_DRAW);
+                
+                // Set up attributes (guard against compiler optimization removing unused attributes)
+                const positionLoc = gl.getAttribLocation(program, 'a_position');
+                const texcoordLoc = gl.getAttribLocation(program, 'a_texcoord');
+
+                if (positionLoc >= 0) {
+                    gl.enableVertexAttribArray(positionLoc);
+                    gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+                    gl.vertexAttribPointer(positionLoc, 2, gl.FLOAT, false, 0, 0);
+                } else {
+                    console.warn('Position attribute optimized out or not found');
+                }
+
+                if (texcoordLoc >= 0) {
+                    gl.enableVertexAttribArray(texcoordLoc);
+                    gl.bindBuffer(gl.ARRAY_BUFFER, texcoordBuffer);
+                    gl.vertexAttribPointer(texcoordLoc, 2, gl.FLOAT, false, 0, 0);
+                } else {
+                    // texcoord is optional for this shader; skip binding if absent
+                    console.warn('Texcoord attribute optimized out or not found');
+                }
+                
+                // Create XRWebGLLayer and request a reference space
+                baseLayer = new XRWebGLLayer(session, gl);
+                session.updateRenderState({ baseLayer });
+                // Request reference space used for the viewer pose
+                xrRefSpace = await session.requestReferenceSpace('local-floor');
+                
+                // Hide start button and show status
+                startButton.style.display = 'none';
+                status.textContent = "WebXR Status: Ready - Rendering...";
+                
+                // Start render loop
+                isRendering = true;
+                session.requestAnimationFrame(renderLoop);
+                
+                // Handle session end
+                session.addEventListener('end', () => {
+                    console.log("Session ended");
+                    isRendering = false;
+                    session = null;
+                    baseLayer = null;
+                    program = null;
+                    gl = null;
+                    
+                    // Show button again
+                    startButton.style.display = 'block';
+                    startButton.disabled = false;
+                    startButton.style.opacity = "1";
+                    status.textContent = "WebXR Status: Session ended - Click to restart";
+                });
+                
+            } catch (err) {
+                console.error("WebXR sanity check failed:", err);
+                status.textContent = "WebXR Status: Error - " + err.message;
+                startButton.disabled = false;
+                startButton.style.opacity = "1";
+            }
+        }
+        
+        function renderLoop(time, frame) {
+            if (!isRendering || !session || !gl || !program || !baseLayer || !xrRefSpace) return;
+
+            try {
+                // Get the viewer pose for the reference space and render each view's viewport
+                const pose = frame.getViewerPose(xrRefSpace);
+                if (!pose) {
+                    session.requestAnimationFrame(renderLoop);
+                    return;
+                }
+
+                gl.clearColor(0, 0, 0, 1);
+                gl.clear(gl.COLOR_BUFFER_BIT);
+
+                for (const view of pose.views) {
+                    const viewport = baseLayer.getViewport(view);
+                    gl.viewport(viewport.x, viewport.y, viewport.width, viewport.height);
+                    // Set per-eye color: left eye = blue, right eye = red
+                    if (uColorLoc) {
+                        if (view.eye === 'left') {
+                            gl.uniform3f(uColorLoc, 0.0, 0.0, 1.0);
+                        } else {
+                            gl.uniform3f(uColorLoc, 1.0, 0.0, 0.0);
+                        }
+                    }
+                    // Draw the quad (fills the current eye's viewport)
+                    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+                }
+
+                // Continue the render loop
+                session.requestAnimationFrame(renderLoop);
+            } catch (err) {
+                console.error("Render loop error:", err);
+            }
+        }
+        
+        // Start when button is clicked
+        document.getElementById("startButton").addEventListener("click", () => {
+            initWebXR();
+        });
+        
+        // Handle window resize
+        window.addEventListener('resize', () => {
+            if (session && gl) {
+                const canvas = document.getElementById('glCanvas');
+                canvas.width = window.innerWidth;
+                canvas.height = window.innerHeight;
+            }
+        });
+    </script> 
+</body>
+</html>

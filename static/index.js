@@ -17,6 +17,48 @@ let texcoordBuffer = null;
 let errorOverlay = document.getElementById("error-overlay");
 let statusEl = document.getElementById("status");
 
+// In-VR log overlay (visible via DOM overlay)
+let logOverlay = null;
+let _logLines = [];
+function createLogOverlay() {
+  if (logOverlay) return;
+  logOverlay = document.createElement('div');
+  logOverlay.id = 'log-overlay';
+  Object.assign(logOverlay.style, {
+    position: 'absolute',
+    right: '12px',
+    top: '12px',
+    width: '320px',
+    maxHeight: '40vh',
+    overflowY: 'auto',
+    background: 'rgba(0,0,0,0.45)',
+    color: '#9ad1ff',
+    fontFamily: 'monospace',
+    fontSize: '12px',
+    padding: '8px',
+    borderRadius: '6px',
+    zIndex: 9999,
+    pointerEvents: 'none',
+    whiteSpace: 'pre-wrap'
+  });
+  document.body.appendChild(logOverlay);
+}
+
+function logToOverlay(msg, level='info') {
+  try {
+    if (!logOverlay) createLogOverlay();
+    const ts = (new Date()).toISOString().replace('T',' ').slice(0,19);
+    const line = `${ts} ${level.toUpperCase()}: ${msg}`;
+    _logLines.push(line);
+    if (_logLines.length > 200) _logLines.shift();
+    logOverlay.textContent = _logLines.join('\n');
+    // keep latest visible
+    logOverlay.scrollTop = logOverlay.scrollHeight;
+  } catch (e) {
+    // ignore overlay errors
+  }
+}
+
 let hasLoggedLeftVideo = false;
 let hasLoggedRightVideo = false;
 
@@ -31,6 +73,7 @@ let calib = null;
 
 function setStatus(message) {
   if (statusEl) statusEl.textContent = message;
+  logToOverlay(message, 'status');
 }
 
 function logError(message, err) {
@@ -41,6 +84,7 @@ function logError(message, err) {
     errorOverlay.textContent = text;
   }
   console.error(text);
+  logToOverlay(text, 'error');
 }
 
 async function loadCalibration() {
@@ -52,6 +96,7 @@ async function loadCalibration() {
       throw new Error("Calibration payload missing required fields");
     }
     setStatus("Calibration loaded");
+    logError("Calibration details", JSON.stringify(calib));
   } catch (err) {
     logError("Failed to load calibration", err);
     throw err;
@@ -91,7 +136,12 @@ function createDefaultTextureCanvas() {
 }
 
 async function startWebRTC() {
-  pc = new RTCPeerConnection();
+  pc = new RTCPeerConnection({
+    iceServers: [
+      { urls: "stun:stun.l.google.com:19302" },
+      { urls: "stun:stun1.l.google.com:19302" }
+    ]
+  });
   setStatus("Starting WebRTC");
 
   pc.onconnectionstatechange = () => setStatus(`WebRTC connection: ${pc.connectionState}`);
@@ -148,12 +198,10 @@ function initGLResources() {
   const vsSource = `
     attribute vec2 a_position;
     attribute vec2 a_texcoord;
-    uniform mat4 uProjection;
-    uniform mat4 uView;
     varying vec2 v_texcoord;
     void main() {
       v_texcoord = a_texcoord;
-      gl_Position = uProjection * uView * vec4(a_position, 0.0, 1.0);
+      gl_Position = vec4(a_position, 0.0, 1.0);
     }
   `;
   const fsSource = `
@@ -173,29 +221,44 @@ function initGLResources() {
     throw new Error(info || "Program link failed");
   }
   uProjectionLoc = gl.getUniformLocation(program, "uProjection");
-  uViewLoc = gl.getUniformLocation(program, "uView");
   samplerLoc = gl.getUniformLocation(program, "u_texture");
   const positionLoc = gl.getAttribLocation(program, "a_position");
   const texcoordLoc = gl.getAttribLocation(program, "a_texcoord");
   positionBuffer = gl.createBuffer();
   gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+  // Use TRIANGLE_STRIP quad (4 vertices) in NDC to fill each eye's viewport
   gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
     -1, -1,
      1, -1,
-     1,  1,
-    -1, -1,
-     1,  1,
-    -1,  1
+    -1,  1,
+     1,  1
   ]), gl.STATIC_DRAW);
-  gl.enableVertexAttribArray(positionLoc);
-  gl.vertexAttribPointer(positionLoc, 2, gl.FLOAT, false, 0, 0);
+
+  // Bind position attribute if present
+  if (positionLoc >= 0) {
+    gl.enableVertexAttribArray(positionLoc);
+    gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+    gl.vertexAttribPointer(positionLoc, 2, gl.FLOAT, false, 0, 0);
+  } else {
+    console.warn('position attribute not found in index.js shader');
+  }
+
   texcoordBuffer = gl.createBuffer();
   gl.bindBuffer(gl.ARRAY_BUFFER, texcoordBuffer);
   gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
-    0,1, 1,1, 0,0, 0,0, 1,1, 1,0
+    0, 1,
+    1, 1,
+    0, 0,
+    1, 0
   ]), gl.STATIC_DRAW);
-  gl.enableVertexAttribArray(texcoordLoc);
-  gl.vertexAttribPointer(texcoordLoc, 2, gl.FLOAT, false, 0, 0);
+
+  if (texcoordLoc >= 0) {
+    gl.enableVertexAttribArray(texcoordLoc);
+    gl.bindBuffer(gl.ARRAY_BUFFER, texcoordBuffer);
+    gl.vertexAttribPointer(texcoordLoc, 2, gl.FLOAT, false, 0, 0);
+  } else {
+    console.warn('texcoord attribute not found in index.js shader');
+  }
 
   // Initialize textures with default content
   leftTexture = gl.createTexture();
@@ -259,28 +322,42 @@ function onXRFrame(time, frame) {
     const session = frame.session;
     const pose = frame.getViewerPose(xrRefSpace);
     if (!pose) { session.requestAnimationFrame(onXRFrame); return; }
-    if (!calib || !projLeft || !projRight || !uProjectionLoc || !uViewLoc || !samplerLoc) {
-      setStatus("Waiting for calibration or GL uniforms"); session.requestAnimationFrame(onXRFrame); return;
+    // Only require the texture sampler to be available — render fixed video
+    // per-eye even if camera calibration or projection data is not present.
+    if (!samplerLoc) {
+      setStatus("Waiting for GL sampler");
+      session.requestAnimationFrame(onXRFrame);
+      return;
     }
     const baseLayer = session.renderState.baseLayer;
     gl.bindFramebuffer(gl.FRAMEBUFFER, baseLayer.framebuffer);
-    gl.clearColor(0,0,0,1); gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.clearColor(0,0,0,1);
+    gl.clear(gl.COLOR_BUFFER_BIT);
     gl.useProgram(program);
+
+    // Render for each eye with fixed view (no head tracking)
     const views = pose.views;
     for (let i = 0; i < views.length; i++) {
       const view = views[i];
       const viewport = baseLayer.getViewport(view);
       gl.viewport(viewport.x, viewport.y, viewport.width, viewport.height);
-      const proj = (view.eye === "left") ? projLeft : projRight;
-      const viewMatrix = new Float32Array(view.transform.inverse.matrix);
-      const baseline = calib.baseline_m;
-      viewMatrix[12] = (view.eye === "left") ? -baseline / 2 : baseline / 2;
-      gl.uniformMatrix4fv(uProjectionLoc, false, proj);
-      gl.uniformMatrix4fv(uViewLoc, false, viewMatrix);
-      if (i === 0) { updateTextureFromVideo(leftTexture, leftVideo); gl.bindTexture(gl.TEXTURE_2D, leftTexture); }
-      else { updateTextureFromVideo(rightTexture, rightVideo); gl.bindTexture(gl.TEXTURE_2D, rightTexture); }
-      gl.uniform1i(samplerLoc, 0);
-      gl.drawArrays(gl.TRIANGLES, 0, 6);
+
+      // Update and bind the correct texture for this eye
+      if (i === 0) {
+        updateTextureFromVideo(leftTexture, leftVideo);
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, leftTexture);
+      } else {
+        updateTextureFromVideo(rightTexture, rightVideo);
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, rightTexture);
+      }
+
+      // Ensure the sampler is set to texture unit 0
+      if (samplerLoc) gl.uniform1i(samplerLoc, 0);
+
+      // Draw the fullscreen quad as a TRIANGLE_STRIP (4 verts)
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     }
     session.requestAnimationFrame(onXRFrame);
   } catch (err) { logError("XR frame error", err); }
@@ -289,3 +366,5 @@ function onXRFrame(time, frame) {
 document.getElementById("enter-vr").addEventListener("click", () => { startXR(); });
 window.addEventListener("error", (event) => { logError("Unhandled error", event.error || event.message); });
 window.addEventListener("unhandledrejection", (event) => { logError("Unhandled promise rejection", event.reason); });
+
+ 
