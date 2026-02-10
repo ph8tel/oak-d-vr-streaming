@@ -9,14 +9,14 @@ class StereoCamera:
         self.pipeline = dai.Pipeline()
 
         # --- Mono cameras ---
-        mono_left = self.pipeline.createMonoCamera()
+        mono_left = self.pipeline.create(dai.node.MonoCamera)
         mono_left.setBoardSocket(dai.CameraBoardSocket.LEFT)
         mono_left.setResolution(dai.MonoCameraProperties.SensorResolution.THE_800_P)
         left_ctrl = mono_left.initialControl
         left_ctrl.setAutoExposureEnable()
         left_ctrl.setAntiBandingMode(dai.CameraControl.AntiBandingMode.AUTO)
 
-        mono_right = self.pipeline.createMonoCamera()
+        mono_right = self.pipeline.create(dai.node.MonoCamera)
         mono_right.setBoardSocket(dai.CameraBoardSocket.RIGHT)
         mono_right.setResolution(dai.MonoCameraProperties.SensorResolution.THE_800_P)
  
@@ -25,7 +25,7 @@ class StereoCamera:
         right_ctrl.setAntiBandingMode(dai.CameraControl.AntiBandingMode.AUTO)
 
         # --- StereoDepth node (rectification + sync) ---
-        stereo = self.pipeline.createStereoDepth()
+        stereo = self.pipeline.create(dai.node.StereoDepth)
         stereo.setDefaultProfilePreset(dai.node.StereoDepth.PresetMode.HIGH_ACCURACY)
         stereo.setRectifyEdgeFillColor(0)  # black borders
         stereo.setDepthAlign(dai.CameraBoardSocket.LEFT)
@@ -36,11 +36,11 @@ class StereoCamera:
         mono_right.out.link(stereo.right)
 
         # --- Output queues for rectified left/right ---
-        xout_left = self.pipeline.createXLinkOut()
+        xout_left = self.pipeline.create(dai.node.XLinkOut)
         xout_left.setStreamName("left")
         stereo.rectifiedLeft.link(xout_left.input)
 
-        xout_right = self.pipeline.createXLinkOut()
+        xout_right = self.pipeline.create(dai.node.XLinkOut)
         xout_right.setStreamName("right")
         stereo.rectifiedRight.link(xout_right.input)
 
