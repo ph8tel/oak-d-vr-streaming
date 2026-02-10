@@ -290,6 +290,7 @@ async def cors_middleware(request, handler):
 
     response = await handler(request)
     response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Cache-Control"] = "no-store"
     return response
 
 app = web.Application(middlewares=[cors_middleware])

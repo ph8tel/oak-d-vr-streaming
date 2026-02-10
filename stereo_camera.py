@@ -91,8 +91,9 @@ class StereoCamera:
 
     def get_calibration(self):
         calib = self.device.readCalibration()
-        k_left = calib.getCameraIntrinsics(dai.CameraBoardSocket.CAM_B, 1280, 800)
-        k_right = calib.getCameraIntrinsics(dai.CameraBoardSocket.CAM_C, 1280, 800)
+        w, h = self.size
+        k_left = calib.getCameraIntrinsics(dai.CameraBoardSocket.CAM_B, w, h)
+        k_right = calib.getCameraIntrinsics(dai.CameraBoardSocket.CAM_C, w, h)
         baseline_m = calib.getBaselineDistance() / 1000.0
         return type("Calibration", (), {
             "k_left": k_left,

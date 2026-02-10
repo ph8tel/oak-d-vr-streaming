@@ -54,14 +54,8 @@ class FakeXLinkOut:
 
 
 class FakePipeline:
-    def createMonoCamera(self):
-        return FakeMonoCamera()
-
-    def createStereoDepth(self):
-        return FakeStereoDepth()
-
-    def createXLinkOut(self):
-        return FakeXLinkOut()
+    def create(self, node_cls):
+        return node_cls()
 
 
 class FakeCameraControl:
@@ -157,7 +151,9 @@ class FakeDai:
     CameraBoardSocket = FakeCameraBoardSocket
 
     class node:
+        MonoCamera = FakeMonoCamera
         StereoDepth = FakeStereoDepth
+        XLinkOut = FakeXLinkOut
 
     def __init__(self, left_frames, right_frames):
         self._left_frames = left_frames
