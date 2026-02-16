@@ -156,31 +156,30 @@ async def offer(request):
     async def on_iceconnectionstatechange():
         print(f"ICE connection state: {pc.iceConnectionState}")
 
-    # Server creates data channel (since server creates offer)
-    data_channel = pc.createDataChannel("poseData", ordered=True, maxRetransmits=0)
-    print(f"[DATA CHANNEL] Created server-side channel: {data_channel.label}")
-    
-    @data_channel.on("message")
-    def on_data_message(message):
-        # Log first few characters to debug format
-        msg_preview = message[:100] if len(message) > 100 else message
-        print(f"[DATA CHANNEL] Received: {msg_preview}")
-        
-        # Forward to servo controller immediately (non-blocking)
-        asyncio.create_task(send_pose_to_servo(message))
-    
-    @data_channel.on("open")
-    def on_data_open():
-        print(f"[DATA CHANNEL] '{data_channel.label}' opened - ready to receive pose data!")
-        try:
-            data_channel.send('{"type":"ack","message":"Server ready to receive pose data"}')
-            print(f"[DATA CHANNEL] Sent ACK to client")
-        except Exception as e:
-            print(f"[DATA CHANNEL] Failed to send ACK: {e}")
-    
-    @data_channel.on("close")
-    def on_data_close():
-        print(f"[DATA CHANNEL] '{data_channel.label}' closed")
+    # Client is the offerer so it creates the data channel.
+    # Server (answerer) receives it here via ondatachannel.
+    @pc.on("datachannel")
+    def on_datachannel(channel):
+        print(f"[DATA CHANNEL] Received client channel: {channel.label}")
+
+        @channel.on("message")
+        def on_data_message(message):
+            msg_preview = message[:100] if len(message) > 100 else message
+            print(f"[DATA CHANNEL] Received: {msg_preview}")
+            asyncio.create_task(send_pose_to_servo(message))
+
+        @channel.on("open")
+        def on_data_open():
+            print(f"[DATA CHANNEL] '{channel.label}' opened")
+            try:
+                channel.send('{"type":"ack","message":"Server ready to receive pose data"}')
+                print(f"[DATA CHANNEL] Sent ACK to client")
+            except Exception as e:
+                print(f"[DATA CHANNEL] Failed to send ACK: {e}")
+
+        @channel.on("close")
+        def on_data_close():
+            print(f"[DATA CHANNEL] '{channel.label}' closed")
 
     # Server sends video tracks
     left_track = CameraTrack(stereo_cam, side="left")
@@ -292,20 +291,24 @@ async def cors_middleware(request, handler):
     response.headers["Cache-Control"] = "no-store"
     return response
 
-app = web.Application(middlewares=[cors_middleware])
+def create_app():
+    app = web.Application(middlewares=[cors_middleware])
 
-app.router.add_post("/offer", offer)
-app.router.add_post("/answer", answer)
-app.router.add_get("/calibration", calibration)
+    app.router.add_post("/offer", offer)
+    app.router.add_post("/answer", answer)
+    app.router.add_get("/calibration", calibration)
 
-# Serve the HTML file at root
-app.router.add_get("/", lambda request: web.FileResponse("./index.html"))
-# Serve static assets from the ./static directory under the /static/ URL path
-app.router.add_static("/static/", "./static", show_index=False)
+    # Serve the HTML file at root
+    app.router.add_get("/", lambda request: web.FileResponse("./index.html"))
+    # Serve static assets from the ./static directory under the /static/ URL path
+    app.router.add_static("/static/", "./static", show_index=False)
 
-app.on_startup.append(on_startup)
-app.on_shutdown.append(on_shutdown)
+    app.on_startup.append(on_startup)
+    app.on_shutdown.append(on_shutdown)
+    return app
 
-# Use HTTP - Cloudflare Tunnel provides HTTPS
-print("Starting HTTP server on port 8080 (Cloudflare Tunnel provides HTTPS)")
-web.run_app(app, port=8080)
+if __name__ == "__main__":
+    app = create_app()
+    # Use HTTP - Cloudflare Tunnel provides HTTPS
+    print("Starting HTTP server on port 8080 (Cloudflare Tunnel provides HTTPS)")
+    web.run_app(app, port=8080)
