@@ -24,6 +24,7 @@ let texOffsetLeft = null;
 let texOffsetRight = null;
 
 let calib = null;
+let dataChannel = null;
 
 async function loadCalibration() {
   try {
@@ -111,6 +112,13 @@ async function startWebRTC() {
 
   pc.onconnectionstatechange = () => setStatus(`WebRTC connection: ${pc.connectionState}`);
   pc.oniceconnectionstatechange = () => setStatus(`ICE state: ${pc.iceConnectionState}`);
+
+  // Client is the offerer — create the data channel here so SCTP
+  // is included in the offer SDP.  The server picks it up via ondatachannel.
+  dataChannel = pc.createDataChannel("poseData", { ordered: true, maxRetransmits: 0 });
+  dataChannel.onopen = () => setStatus("Data channel open");
+  dataChannel.onclose = () => { dataChannel = null; setStatus("Data channel closed"); };
+  dataChannel.onmessage = (e) => { logToOverlay("Server: " + e.data); };
 
   let videoCount = 0;
   pc.ontrack = (event) => {
@@ -285,6 +293,20 @@ function onXRFrame(time, frame) {
     const session = frame.session;
     const pose = frame.getViewerPose(xrRefSpace);
     if (!pose) { session.requestAnimationFrame(onXRFrame); return; }
+
+    // Send head pose to servo controller via data channel
+    if (dataChannel && dataChannel.readyState === "open") {
+      const p = pose.transform.position;
+      const q = pose.transform.orientation;
+      dataChannel.send(JSON.stringify({
+        type: "pose",
+        position: { x: p.x, y: p.y, z: p.z },
+        orientation: { x: q.x, y: q.y, z: q.z, w: q.w }
+      }));
+    }
+
+    // Send controller joystick + button state
+    sendControllerData(session.inputSources);
     // Only require the texture sampler to be available — render fixed video
     // per-eye even if camera calibration or projection data is not present.
     if (!samplerLoc) {
