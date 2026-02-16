@@ -12,19 +12,16 @@ let leftTexture = null;
 let rightTexture = null;
 let program = null;
 let positionBuffer = null;
-let texcoordBuffer = null;
-
-
 
 let hasLoggedLeftVideo = false;
 let hasLoggedRightVideo = false;
 
-let uProjectionLoc = null;
-let uViewLoc = null;
+let uTexOffsetLoc = null;
 let samplerLoc = null;
+let positionAttrLoc = -1;
 
-let projLeft = null;
-let projRight = null;
+let texOffsetLeft = null;
+let texOffsetRight = null;
 
 let calib = null;
 
@@ -37,7 +34,7 @@ async function loadCalibration() {
       throw new Error("Calibration payload missing required fields");
     }
     setStatus("Calibration loaded");
-    logError("Calibration details", JSON.stringify(calib));
+    logToOverlay("Calibration: " + JSON.stringify(calib), "info");
   } catch (err) {
     logError("Failed to load calibration", err);
     throw err;
@@ -45,29 +42,46 @@ async function loadCalibration() {
 }
 
 /**
- * Build a per-eye shift matrix for flat video passthrough.
+ * Compute a per-eye horizontal texture-coordinate offset.
  *
- * For flat stereo video the quad must fill the viewport exactly (identity
- * scale).  The only correction needed is a horizontal translation that
- * aligns the physical camera's optical axis (cx) with the headset
- * viewport centre.  A positive shift moves the image left (pushes
- * convergence closer), a negative shift moves it right.
+ * Shifts which part of each camera's image is displayed, effectively
+ * reducing or increasing the stereo baseline as seen by the viewer.
+ * This moves the zero-disparity (fusion) plane from infinity to a
+ * finite convergence distance.
  *
- * dx = (cx - width/2) / (width/2)   → NDC units
- * dy = (cy - height/2) / (height/2) → NDC units (usually ~0)
+ * Left eye: shift texcoords right (+u) → crops from the right side of
+ *           the left camera image → moves image nasally.
+ * Right eye: shift texcoords left (−u) → crops from the left side of
+ *            the right camera image → moves image nasally.
+ *
+ * The shift in texcoord units (0–1):
+ *   offset = fx * baseline_m / (2 * convergence_m * width)
+ *
+ * @param {number[][]} K              3×3 intrinsic matrix
+ * @param {number}     width          frame width in pixels
+ * @param {number}     height         frame height in pixels
+ * @param {number}     baseline_m     camera baseline in metres
+ * @param {number}     convergence_m  target fusion distance in metres
+ * @param {string}     eye            "left" or "right"
+ * @returns {Float32Array} [du, dv] texture-coordinate offset
  */
-function principalPointShift(K, width, height) {
+function perEyeTexOffset(K, width, height, baseline_m, convergence_m, eye) {
+  const fx = K[0][0];
   const cx = K[0][2];
   const cy = K[1][2];
-  const dx = (cx - width  / 2) / (width  / 2);
-  const dy = (cy - height / 2) / (height / 2);
-  // Column-major identity + translation
-  return new Float32Array([
-    1, 0, 0, 0,
-    0, 1, 0, 0,
-    0, 0, 1, 0,
-    -dx, dy, 0, 1   // negate dx: camera cx right-of-centre → shift image left
-  ]);
+
+  // Principal-point correction in texcoord space (0–1)
+  const dx_pp = (cx - width  / 2) / width;
+  const dy_pp = (cy - height / 2) / height;
+
+  // Convergence shift in texcoord space (0–1), half-disparity per eye
+  const conv_tc = (fx * baseline_m) / (2.0 * convergence_m * width);
+  const eye_sign = (eye === "left") ? 1 : -1;
+
+  const du = -dx_pp + eye_sign * conv_tc;
+  const dv = dy_pp;
+
+  return new Float32Array([du, dv]);
 }
 
 function createDefaultTextureCanvas() {
@@ -148,12 +162,13 @@ function initGLResources() {
   gl = canvas.getContext("webgl", { xrCompatible: true });
   const vsSource = `
     attribute vec2 a_position;
-    attribute vec2 a_texcoord;
-    uniform mat4 uProjection;
+    uniform vec2 uTexOffset;
     varying vec2 v_texcoord;
     void main() {
-      v_texcoord = a_texcoord;
-      gl_Position = uProjection * vec4(a_position, 0.0, 1.0);
+      // Derive texcoords from NDC position: (-1,-1)..(1,1) → (0,1)..(1,0)
+      // Flip Y because texcoord (0,0) is top-left but NDC (-1,-1) is bottom-left
+      v_texcoord = vec2(a_position.x * 0.5 + 0.5, 1.0 - (a_position.y * 0.5 + 0.5)) + uTexOffset;
+      gl_Position = vec4(a_position, 0.0, 1.0);
     }
   `;
   const fsSource = `
@@ -172,10 +187,9 @@ function initGLResources() {
     const info = gl.getProgramInfoLog(program);
     throw new Error(info || "Program link failed");
   }
-  uProjectionLoc = gl.getUniformLocation(program, "uProjection");
+  uTexOffsetLoc = gl.getUniformLocation(program, "uTexOffset");
   samplerLoc = gl.getUniformLocation(program, "u_texture");
-  const positionLoc = gl.getAttribLocation(program, "a_position");
-  const texcoordLoc = gl.getAttribLocation(program, "a_texcoord");
+  positionAttrLoc = gl.getAttribLocation(program, "a_position");
   positionBuffer = gl.createBuffer();
   gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
   // Use TRIANGLE_STRIP quad (4 vertices) in NDC to fill each eye's viewport
@@ -187,29 +201,12 @@ function initGLResources() {
   ]), gl.STATIC_DRAW);
 
   // Bind position attribute if present
-  if (positionLoc >= 0) {
-    gl.enableVertexAttribArray(positionLoc);
+  if (positionAttrLoc >= 0) {
+    gl.enableVertexAttribArray(positionAttrLoc);
     gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
-    gl.vertexAttribPointer(positionLoc, 2, gl.FLOAT, false, 0, 0);
+    gl.vertexAttribPointer(positionAttrLoc, 2, gl.FLOAT, false, 0, 0);
   } else {
     console.warn('position attribute not found in index.js shader');
-  }
-
-  texcoordBuffer = gl.createBuffer();
-  gl.bindBuffer(gl.ARRAY_BUFFER, texcoordBuffer);
-  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
-    0, 1,
-    1, 1,
-    0, 0,
-    1, 0
-  ]), gl.STATIC_DRAW);
-
-  if (texcoordLoc >= 0) {
-    gl.enableVertexAttribArray(texcoordLoc);
-    gl.bindBuffer(gl.ARRAY_BUFFER, texcoordBuffer);
-    gl.vertexAttribPointer(texcoordLoc, 2, gl.FLOAT, false, 0, 0);
-  } else {
-    console.warn('texcoord attribute not found in index.js shader');
   }
 
   // Initialize textures with default content
@@ -242,8 +239,22 @@ async function startXR() {
     try { initGLResources(); } catch (err) { logError("WebGL init failed", err); return; }
   }
   const width = 1280, height = 720;
-  projLeft = principalPointShift(calib.k_left, width, height);
-  projRight = principalPointShift(calib.k_right, width, height);
+
+  // Convergence distance — objects at this distance will fuse (zero
+  // disparity).  Closer objects pop forward, farther ones recede.
+  // 1.2 m ≈ 4 ft is good for a bookcase-distance test.
+  const CONVERGENCE_M = 1.2;
+
+  texOffsetLeft  = perEyeTexOffset(calib.k_left,  width, height,
+                                    calib.baseline_m, CONVERGENCE_M, "left");
+  texOffsetRight = perEyeTexOffset(calib.k_right, width, height,
+                                    calib.baseline_m, CONVERGENCE_M, "right");
+
+  const shiftPx = (calib.k_left[0][0] * calib.baseline_m / (2 * CONVERGENCE_M)).toFixed(1);
+  logToOverlay(
+    `Convergence: ${CONVERGENCE_M}m, baseline: ${(calib.baseline_m * 1000).toFixed(1)}mm, ` +
+    `fx: ${calib.k_left[0][0].toFixed(1)}, shift: ${shiftPx}px/eye`, "info");
+
 
   xrSession = await navigator.xr.requestSession("immersive-vr", {
     requiredFeatures: ["local-floor"], optionalFeatures: ["dom-overlay"], domOverlay: { root: document.body }
@@ -287,15 +298,26 @@ function onXRFrame(time, frame) {
     gl.clear(gl.COLOR_BUFFER_BIT);
     gl.useProgram(program);
 
-    // Render for each eye with fixed view (no head tracking)
+    // Re-bind position attribute every frame — the XR compositor
+    // clobbers WebGL1 global attribute state between frames.
+    if (positionAttrLoc >= 0) {
+      gl.enableVertexAttribArray(positionAttrLoc);
+      gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+      gl.vertexAttribPointer(positionAttrLoc, 2, gl.FLOAT, false, 0, 0);
+    }
+
+    // Render for each eye — use XRView.eye to pick the correct texture
+    // and texcoord offset.
     const views = pose.views;
     for (let i = 0; i < views.length; i++) {
       const view = views[i];
       const viewport = baseLayer.getViewport(view);
       gl.viewport(viewport.x, viewport.y, viewport.width, viewport.height);
 
+      const isLeft = (view.eye === "left");
+
       // Update and bind the correct texture for this eye
-      if (i === 0) {
+      if (isLeft) {
         updateTextureFromVideo(leftTexture, leftVideo);
         gl.activeTexture(gl.TEXTURE0);
         gl.bindTexture(gl.TEXTURE_2D, leftTexture);
@@ -305,13 +327,12 @@ function onXRFrame(time, frame) {
         gl.bindTexture(gl.TEXTURE_2D, rightTexture);
       }
 
-      // Ensure the sampler is set to texture unit 0
       if (samplerLoc) gl.uniform1i(samplerLoc, 0);
 
-      // Set per-eye projection from camera calibration
-      const proj = (i === 0) ? projLeft : projRight;
-      if (uProjectionLoc && proj) {
-        gl.uniformMatrix4fv(uProjectionLoc, false, proj);
+      // Set per-eye texture offset for convergence
+      const offset = isLeft ? texOffsetLeft : texOffsetRight;
+      if (uTexOffsetLoc) {
+        gl.uniform2fv(uTexOffsetLoc, offset || new Float32Array([0, 0]));
       }
 
       // Draw the fullscreen quad as a TRIANGLE_STRIP (4 verts)
@@ -324,5 +345,3 @@ function onXRFrame(time, frame) {
 document.getElementById("enter-vr").addEventListener("click", () => { startXR(); });
 window.addEventListener("error", (event) => { logError("Unhandled error", event.error || event.message); });
 window.addEventListener("unhandledrejection", (event) => { logError("Unhandled promise rejection", event.reason); });
-
- 
