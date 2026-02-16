@@ -25,6 +25,20 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+## Project layout
+```
+index.html              — HTML shell, served at /
+static/
+  index.js              — WebXR + WebGL render loop, WebRTC client
+  index.css             — UI styles
+  logging.js            — in-VR log overlay helpers (shared)
+  sanity.html           — standalone per-eye colour test (no camera)
+stereo_camera.py        — OAK-D DepthAI pipeline (rectified stereo)
+vr_server.py            — aiohttp + aiortc signaling & streaming server
+utils/local_display.py  — OpenCV preview of the stereo feed
+tests/                  — pytest suite (runs without camera hardware)
+```
+
 ## Cloudflare Tunnel (required for VR access)
 WebXR generally requires a secure context (HTTPS). Use Cloudflare Tunnel or a deployed HTTPS server so the headset can access the page.
 
@@ -67,34 +81,41 @@ WebGL texImage2D per eye            — uploads each <video> as a GPU texture
 XR render loop (onXRFrame)          — draws a fullscreen quad per eye viewport
   │
   ▼
-Per-eye principal-point shift       — translates each quad in NDC to align the
-                                      camera's optical axis (cx, cy) with the
-                                      headset viewport centre
+Per-eye texture-coordinate offset   — shifts UVs to align each camera's optical
+  (uTexOffset uniform)                axis with the viewport center and fuse
+                                      the stereo pair at a given convergence
+                                      distance
 ```
 
-### Why principal-point shift, not a full projection matrix
+### Why a texture-coordinate offset, not a full projection matrix
 
-Because the video is already a flat 2D image (not a 3D scene), the quad must fill the viewport at 1:1 scale. The only geometric correction needed is a per-eye **translation** that accounts for the difference between each camera's optical centre (`cx`) and the frame centre. This is what fuses the stereo pair at the correct convergence distance.
+Because the video is already a flat 2D image (not a 3D scene), the quad must fill the viewport at 1:1 scale. There is no 3D geometry to project — only two corrections are needed:
+
+1. **Principal-point correction** — account for the difference between each camera's optical center (`cx`, `cy`) and the frame center.
+2. **Convergence shift** — apply a half-disparity offset so the stereo pair fuses at a chosen distance.
 
 A full OpenCV-style perspective projection (`2*fx/width`, depth terms, etc.) is designed for projecting 3D world-space geometry through a pinhole model. Applying it to an already-captured flat image over-scales the quad and distorts convergence, causing diplopia.
 
-The shift is computed from calibration intrinsics served by the `/calibration` endpoint:
+Both corrections are combined into a single `uTexOffset` uniform (in texture-coordinate space, 0–1) computed from calibration intrinsics served by `/calibration`:
 
 ```
-dx = (cx − width/2) / (width/2)    → NDC horizontal offset
+dx_pp   = (cx − width/2) / width          — principal-point offset (texcoord space)
+conv_tc = (fx × baseline) / (2 × conv × width) — half-disparity for convergence
+du      = −dx_pp ± conv_tc                 — combined per-eye horizontal offset
+dv      = (cy − height/2) / height         — vertical principal-point offset
 ```
 
-Each eye gets a slightly different `dx`, and the ~9 pixel differential is what makes the stereo pair fuse correctly at the camera's convergence plane.
+The `±` sign is `+` for the left eye and `−` for the right, pushing the textures apart by the disparity that corresponds to the target convergence distance (default 1.2 m).
 
 ### Head tracking
 
 The XR render loop obtains `pose.views` from the headset but does **not** apply the headset's view/projection matrices to the video. The headset pose is forwarded over a WebRTC data channel (`poseData`) to a servo controller that physically moves the camera. The video in the goggles always shows exactly what the camera sees — no synthetic re-projection.
 
 ## Quick camera sanity test
-Use the direct DepthAI display test to verify the camera feed:
+Use the local display script to verify the camera feed (requires a connected monitor):
 
 ```bash
-python test_display.py
+python utils/local_display.py
 ```
 
 ## Tests (with mocks)
