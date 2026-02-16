@@ -54,14 +54,8 @@ class FakeXLinkOut:
 
 
 class FakePipeline:
-    def createMonoCamera(self):
-        return FakeMonoCamera()
-
-    def createStereoDepth(self):
-        return FakeStereoDepth()
-
-    def createXLinkOut(self):
-        return FakeXLinkOut()
+    def create(self, node_cls):
+        return node_cls()
 
 
 class FakeCameraControl:
@@ -77,12 +71,14 @@ class FakeCameraControl:
 
 class FakeMonoCameraProperties:
     class SensorResolution:
-        THE_720_P = object()
+        THE_800_P = object()
 
 
 class FakeCameraBoardSocket:
     LEFT = object()
     RIGHT = object()
+    CAM_B = object()
+    CAM_C = object()
 
 
 class FakeQueue:
@@ -111,12 +107,42 @@ class FakeDevice:
             "left": FakeQueue(left_frames),
             "right": FakeQueue(right_frames),
         }
+        self._calibration = FakeCalibration()
+        self.closed = False
 
     def getOutputQueue(self, name, maxSize=4, blocking=False):
         return self._queues[name]
 
+    def readCalibration(self):
+        return self._calibration
+
     def close(self):
-        pass
+        self.closed = True
+
+
+class FakeCalibration:
+    def __init__(self):
+        self._k_left = [
+            [795.4886474609375, 0.0, 600.0050659179688],
+            [0.0, 795.4052734375, 371.02874755859375],
+            [0.0, 0.0, 1.0],
+        ]
+        self._k_right = [
+            [796.63427734375, 0.0, 591.0748291015625],
+            [0.0, 796.3245239257812, 373.3175048828125],
+            [0.0, 0.0, 1.0],
+        ]
+        self._baseline_m = 0.07500000476837158
+
+    def getCameraIntrinsics(self, socket, _width, _height):
+        if socket is FakeCameraBoardSocket.CAM_B:
+            return self._k_left
+        if socket is FakeCameraBoardSocket.CAM_C:
+            return self._k_right
+        raise ValueError("Unknown camera socket")
+
+    def getBaselineDistance(self):
+        return self._baseline_m * 1000.0
 
 
 class FakeDai:
@@ -126,7 +152,9 @@ class FakeDai:
     CameraBoardSocket = FakeCameraBoardSocket
 
     class node:
+        MonoCamera = FakeMonoCamera
         StereoDepth = FakeStereoDepth
+        XLinkOut = FakeXLinkOut
 
     def __init__(self, left_frames, right_frames):
         self._left_frames = left_frames
@@ -205,3 +233,34 @@ def test_clear_cache_allows_new_frames(monkeypatch):
 
     assert not np.array_equal(frameL1, frameL2)
     assert not np.array_equal(frameR1, frameR2)
+
+def test_get_calibration_returns_intrinsics(monkeypatch):
+    fake_dai = FakeDai([], [])
+    monkeypatch.setattr(stereo_camera, "dai", fake_dai)
+
+    cam = stereo_camera.StereoCamera(size=(1280, 720))
+    calib = cam.get_calibration()
+
+    assert hasattr(calib, "k_left")
+    assert hasattr(calib, "k_right")
+    assert hasattr(calib, "baseline_m")
+
+
+def test_stop_closes_device(monkeypatch):
+    fake_dai = FakeDai([], [])
+    monkeypatch.setattr(stereo_camera, "dai", fake_dai)
+
+    cam = stereo_camera.StereoCamera(size=(1280, 720))
+    cam.stop()
+
+    assert cam.device.closed
+
+
+def test_stop_ignores_close_error(monkeypatch):
+    fake_dai = FakeDai([], [])
+    monkeypatch.setattr(stereo_camera, "dai", fake_dai)
+
+    cam = stereo_camera.StereoCamera(size=(1280, 720))
+    # Make close() raise to verify stop() swallows it
+    cam.device.close = lambda: (_ for _ in ()).throw(RuntimeError("boom"))
+    cam.stop()  # should not raise

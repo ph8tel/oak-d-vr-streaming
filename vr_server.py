@@ -3,7 +3,7 @@
 import asyncio
 import cv2
 import fractions
-from aiortc import RTCPeerConnection, RTCSessionDescription, VideoStreamTrack
+from aiortc import RTCPeerConnection, RTCSessionDescription, VideoStreamTrack, RTCConfiguration, RTCIceServer
 from aiohttp import web
 import numpy as np
 from stereo_camera import StereoCamera
@@ -12,55 +12,76 @@ from stereo_camera import StereoCamera
 # Custom Video Track for WebRTC
 # -----------------------------
 class CameraTrack(VideoStreamTrack):
-    _shared_timestamp = 0
-    _timestamp = 0
+    """Sends one eye of the stereo pair with clock-based pacing.
+
+    Both left and right tracks share the same frame cache so
+    they always deliver the same stereo pair (no eye desync).
+    The left track drives the capture; the right track reuses it.
+    """
+    _FPS = 30
+    _INTERVAL = 1 / _FPS
+    _TIME_BASE = fractions.Fraction(1, 90000)
+    _PTS_STEP = int(90000 / _FPS)
+
+    # Shared across both tracks
+    _current_pts = 0
+    _cached_left = None
+    _cached_right = None
+    _cache_lock = None  # set in first recv()
 
     def __init__(self, stereo_cam, side="left"):
         super().__init__()
         self.stereo_cam = stereo_cam
         self.side = side
-        self.frame_count = 0
-        self._start = None
+        self._start_time = None
+        self._frame_count = 0
         print(f"CameraTrack created: {side}")
 
     async def recv(self):
-        self.frame_count += 1
-        if self.frame_count == 1:
+        from av import VideoFrame
+
+        # Initialise shared lock once
+        if CameraTrack._cache_lock is None:
+            CameraTrack._cache_lock = asyncio.Lock()
+
+        # --- Clock-based pacing (wall-clock, not fixed sleep) ---
+        if self._start_time is None:
+            self._start_time = asyncio.get_event_loop().time()
+
+        self._frame_count += 1
+        target_time = self._start_time + self._frame_count * self._INTERVAL
+        now = asyncio.get_event_loop().time()
+        wait = target_time - now
+        if wait > 0:
+            await asyncio.sleep(wait)
+
+        if self._frame_count == 1:
             print(f"{self.side} track: recv() called for first time!")
 
-        await asyncio.sleep(1 / 30)
-
         try:
-            # Left eye triggers a fresh stereo capture
-            if self.side == "left":
-                self.stereo_cam.clear_cache()
-                frameL, frameR = self.stereo_cam.get_frames_once()
+            async with CameraTrack._cache_lock:
+                # Left eye triggers a fresh capture (both tracks share the result)
+                if self.side == "left":
+                    self.stereo_cam.clear_cache()
+                    frameL, frameR = self.stereo_cam.get_frames_once()
+                    CameraTrack._cached_left = cv2.cvtColor(frameL, cv2.COLOR_RGB2BGR)
+                    CameraTrack._cached_right = cv2.cvtColor(frameR, cv2.COLOR_RGB2BGR)
+                    CameraTrack._current_pts += self._PTS_STEP
 
-                # Shared timestamp for this stereo pair
-                CameraTrack._shared_timestamp = CameraTrack._timestamp
-                CameraTrack._timestamp += int(90000 / 30)
-            else:
-                # Right eye reuses the same stereo pair
-                frameL, frameR = self.stereo_cam.get_frames_once()
+            # Pick the correct eye
+            frame_bgr = CameraTrack._cached_left if self.side == "left" else CameraTrack._cached_right
 
-            frame = frameL if self.side == "left" else frameR
-            frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+            # Fallback if right track runs before first left capture
+            if frame_bgr is None:
+                frame_bgr = np.zeros((720, 1280, 3), dtype=np.uint8)
 
-        except Exception as e:
-            print(f"CameraTrack frame capture error ({self.side}):", e)
-            import traceback
-            traceback.print_exc()
-            raise
-
-        try:
-            from av import VideoFrame
             video_frame = VideoFrame.from_ndarray(frame_bgr, format="bgr24")
-            video_frame.pts = CameraTrack._shared_timestamp
-            video_frame.time_base = fractions.Fraction(1, 90000)
+            video_frame.pts = CameraTrack._current_pts
+            video_frame.time_base = self._TIME_BASE
             return video_frame
 
         except Exception as e:
-            print(f"CameraTrack VideoFrame creation error ({self.side}):", e)
+            print(f"CameraTrack error ({self.side}): {e}")
             import traceback
             traceback.print_exc()
             raise
@@ -70,7 +91,9 @@ class CameraTrack(VideoStreamTrack):
 # WebRTC Signaling Server
 # -----------------------------
 pcs = set()
-stereo_cam = StereoCamera(size=(1280, 720))
+# Defer creating the StereoCamera until startup so the server can run
+# even if DepthAI hardware or driver APIs are missing during import.
+stereo_cam = None
 
 # Store the most recent peer connection for answer endpoint
 _current_pc = None
@@ -98,7 +121,6 @@ async def send_pose_to_servo(pose_json):
     """Send pose data to Pi 4 servo controller (non-blocking)"""
     global servo_writer
     if not servo_writer:
-        
         return  # Silently skip if not connected
     
     async with servo_lock:
@@ -118,7 +140,11 @@ async def offer(request):
     params = await request.json()
     client_offer = RTCSessionDescription(sdp=params["sdp"], type=params["type"])
 
-    pc = RTCPeerConnection()
+    ice_config = RTCConfiguration(iceServers=[
+        RTCIceServer(urls=["stun:stun.l.google.com:19302",
+                          "stun:stun1.l.google.com:19302"])
+    ])
+    pc = RTCPeerConnection(configuration=ice_config)
     pcs.add(pc)
     _current_pc = pc
 
@@ -203,9 +229,39 @@ async def answer(request):
     
     return web.json_response({"status": "ok"}, headers=headers)
 
+
+async def calibration(request):
+    headers = {"Access-Control-Allow-Origin": "*"}
+    try:
+        calib = stereo_cam.get_calibration()
+        print("calibration: ", calib.k_left, calib.k_right, calib.baseline_m   )
+        return web.json_response({
+            "k_left": calib.k_left,
+            "k_right": calib.k_right,
+            "baseline_m": calib.baseline_m,
+        }, headers=headers)
+        
+    except Exception as e:
+        print("Calibration error:", e)
+        import traceback
+        traceback.print_exc()
+        return web.json_response({"error": str(e)}, headers=headers)
+
+
 async def on_startup(app):
     # Connect to Pi 4 servo controller (optional, non-blocking)
     await connect_to_servo_controller(host='192.168.1.138', port=9090)
+    # Initialize stereo camera here so import-time failures don't kill the server
+    global stereo_cam
+    if stereo_cam is None:
+        try:
+            stereo_cam = StereoCamera(size=(1280, 720))
+            print("✓ StereoCamera initialized")
+        except Exception as e:
+            print("Warning: StereoCamera initialization failed:", e)
+            import traceback
+            traceback.print_exc()
+            stereo_cam = None
 
 async def on_shutdown(app):
     global servo_writer
@@ -216,7 +272,11 @@ async def on_shutdown(app):
     
     for pc in pcs:
         await pc.close()
-    stereo_cam.stop()
+    if stereo_cam:
+        try:
+            stereo_cam.stop()
+        except Exception:
+            pass
 # Add this BEFORE creating routes
 @web.middleware
 async def cors_middleware(request, handler):
@@ -229,16 +289,19 @@ async def cors_middleware(request, handler):
 
     response = await handler(request)
     response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Cache-Control"] = "no-store"
     return response
 
 app = web.Application(middlewares=[cors_middleware])
 
 app.router.add_post("/offer", offer)
 app.router.add_post("/answer", answer)
+app.router.add_get("/calibration", calibration)
 
 # Serve the HTML file at root
 app.router.add_get("/", lambda request: web.FileResponse("./index.html"))
-app.router.add_static("/", "./", show_index=False)
+# Serve static assets from the ./static directory under the /static/ URL path
+app.router.add_static("/static/", "./static", show_index=False)
 
 app.on_startup.append(on_startup)
 app.on_shutdown.append(on_shutdown)

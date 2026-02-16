@@ -9,23 +9,23 @@ class StereoCamera:
         self.pipeline = dai.Pipeline()
 
         # --- Mono cameras ---
-        mono_left = self.pipeline.createMonoCamera()
+        mono_left = self.pipeline.create(dai.node.MonoCamera)
         mono_left.setBoardSocket(dai.CameraBoardSocket.LEFT)
-        mono_left.setResolution(dai.MonoCameraProperties.SensorResolution.THE_720_P)
+        mono_left.setResolution(dai.MonoCameraProperties.SensorResolution.THE_800_P)
         left_ctrl = mono_left.initialControl
         left_ctrl.setAutoExposureEnable()
         left_ctrl.setAntiBandingMode(dai.CameraControl.AntiBandingMode.AUTO)
 
-        mono_right = self.pipeline.createMonoCamera()
+        mono_right = self.pipeline.create(dai.node.MonoCamera)
         mono_right.setBoardSocket(dai.CameraBoardSocket.RIGHT)
-        mono_right.setResolution(dai.MonoCameraProperties.SensorResolution.THE_720_P)
+        mono_right.setResolution(dai.MonoCameraProperties.SensorResolution.THE_800_P)
  
         right_ctrl = mono_right.initialControl
         right_ctrl.setAutoExposureEnable()
         right_ctrl.setAntiBandingMode(dai.CameraControl.AntiBandingMode.AUTO)
 
         # --- StereoDepth node (rectification + sync) ---
-        stereo = self.pipeline.createStereoDepth()
+        stereo = self.pipeline.create(dai.node.StereoDepth)
         stereo.setDefaultProfilePreset(dai.node.StereoDepth.PresetMode.HIGH_ACCURACY)
         stereo.setRectifyEdgeFillColor(0)  # black borders
         stereo.setDepthAlign(dai.CameraBoardSocket.LEFT)
@@ -36,11 +36,11 @@ class StereoCamera:
         mono_right.out.link(stereo.right)
 
         # --- Output queues for rectified left/right ---
-        xout_left = self.pipeline.createXLinkOut()
+        xout_left = self.pipeline.create(dai.node.XLinkOut)
         xout_left.setStreamName("left")
         stereo.rectifiedLeft.link(xout_left.input)
 
-        xout_right = self.pipeline.createXLinkOut()
+        xout_right = self.pipeline.create(dai.node.XLinkOut)
         xout_right.setStreamName("right")
         stereo.rectifiedRight.link(xout_right.input)
 
@@ -70,10 +70,6 @@ class StereoCamera:
 
         return frameL_rgb, frameR_rgb
 
-    def get_stereo_frame(self):
-        L, R = self.get_frames()
-        return np.hstack((L, R))
-
     def stop(self):
         try:
             self.device.close()
@@ -88,3 +84,16 @@ class StereoCamera:
     def clear_cache(self):
         if hasattr(self, "_cached"):
             del self._cached
+
+    def get_calibration(self):
+        calib = self.device.readCalibration()
+        w, h = self.size
+        k_left = calib.getCameraIntrinsics(dai.CameraBoardSocket.CAM_B, w, h)
+        k_right = calib.getCameraIntrinsics(dai.CameraBoardSocket.CAM_C, w, h)
+        baseline_m = calib.getBaselineDistance() / 1000.0
+        return type("Calibration", (), {
+            "k_left": k_left,
+            "k_right": k_right,
+            "baseline_m": baseline_m,
+
+        })()
