@@ -121,7 +121,6 @@ async def send_pose_to_servo(pose_json):
     """Send pose data to Pi 4 servo controller (non-blocking)"""
     global servo_writer
     if not servo_writer:
-        
         return  # Silently skip if not connected
     
     async with servo_lock:
