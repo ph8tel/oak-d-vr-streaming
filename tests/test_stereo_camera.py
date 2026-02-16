@@ -108,6 +108,7 @@ class FakeDevice:
             "right": FakeQueue(right_frames),
         }
         self._calibration = FakeCalibration()
+        self.closed = False
 
     def getOutputQueue(self, name, maxSize=4, blocking=False):
         return self._queues[name]
@@ -116,7 +117,7 @@ class FakeDevice:
         return self._calibration
 
     def close(self):
-        pass
+        self.closed = True
 
 
 class FakeCalibration:
@@ -243,3 +244,23 @@ def test_get_calibration_returns_intrinsics(monkeypatch):
     assert hasattr(calib, "k_left")
     assert hasattr(calib, "k_right")
     assert hasattr(calib, "baseline_m")
+
+
+def test_stop_closes_device(monkeypatch):
+    fake_dai = FakeDai([], [])
+    monkeypatch.setattr(stereo_camera, "dai", fake_dai)
+
+    cam = stereo_camera.StereoCamera(size=(1280, 720))
+    cam.stop()
+
+    assert cam.device.closed
+
+
+def test_stop_ignores_close_error(monkeypatch):
+    fake_dai = FakeDai([], [])
+    monkeypatch.setattr(stereo_camera, "dai", fake_dai)
+
+    cam = stereo_camera.StereoCamera(size=(1280, 720))
+    # Make close() raise to verify stop() swallows it
+    cam.device.close = lambda: (_ for _ in ()).throw(RuntimeError("boom"))
+    cam.stop()  # should not raise

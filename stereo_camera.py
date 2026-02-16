@@ -70,10 +70,6 @@ class StereoCamera:
 
         return frameL_rgb, frameR_rgb
 
-    def get_stereo_frame(self):
-        L, R = self.get_frames()
-        return np.hstack((L, R))
-
     def stop(self):
         try:
             self.device.close()
